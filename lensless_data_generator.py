@@ -8,7 +8,7 @@ from PIL import Image
 import sys
 sys.path.append('/home/jmathew_waller/workspace/convolutions')
 from smiley_face_distribution import generate_distribution
-# smiley_img = Image.open("../../../../convolutions/Asset 3.png").convert("L")
+# smiley_img = Image.open("../../../../convolutions/Asset 3.png").convert("L") #TODO: add smiley_face support again
 
 # ENTIRE THING IS COPIED AND PASTED FROM ENCODINGINFORMATION
 

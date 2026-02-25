@@ -1,0 +1,31 @@
+2026-02-25 01:52:40,881 INFO    MainThread:1784778 [wandb_setup.py:_flush():81] Current SDK version is 0.22.0
+2026-02-25 01:52:40,881 INFO    MainThread:1784778 [wandb_setup.py:_flush():81] Configure stats pid to 1784778
+2026-02-25 01:52:40,881 INFO    MainThread:1784778 [wandb_setup.py:_flush():81] Loading settings from /home/jmathew_waller/.config/wandb/settings
+2026-02-25 01:52:40,881 INFO    MainThread:1784778 [wandb_setup.py:_flush():81] Loading settings from /home/jmathew_waller/workspace/e2e-imaging/wandb/settings
+2026-02-25 01:52:40,881 INFO    MainThread:1784778 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-02-25 01:52:40,882 INFO    MainThread:1784778 [wandb_init.py:setup_run_log_directory():686] Logging user logs to /home/jmathew_waller/workspace/e2e-imaging/wandb/run-20260225_015240-w61fvrwt/logs/debug.log
+2026-02-25 01:52:40,882 INFO    MainThread:1784778 [wandb_init.py:setup_run_log_directory():687] Logging internal logs to /home/jmathew_waller/workspace/e2e-imaging/wandb/run-20260225_015240-w61fvrwt/logs/debug-internal.log
+2026-02-25 01:52:40,882 INFO    MainThread:1784778 [wandb_init.py:monkeypatch_ipython():605] configuring jupyter hooks <wandb.sdk.wandb_init._WandbInit object at 0x7f62a0ae8cd0>
+2026-02-25 01:52:40,882 INFO    MainThread:1784778 [wandb_init.py:init():813] calling init triggers
+2026-02-25 01:52:40,883 INFO    MainThread:1784778 [wandb_init.py:init():818] wandb.init called with sweep_config: {}
+config: {'general': {'seed_value': 0}, 'dataset': {'subset_fraction': 0.01, 'photon_count': 160, 'tile_rows': 1, 'tile_cols': 1, 'batch_size': 32, 'dataset_name': 'mnist'}, 'psf_layer': {'object_size': 32, 'num_gaussian': 10, 'psf_size': (32, 32)}, 'optimization': {'initial log_K': Array(-1., dtype=float32, weak_type=True), 'learning_rate': 0.001}, 'logging': {'use_wandb': True, 'project_name': 'e2e_imaging_playground', 'run_name': 'mnist_photon_count_160_num_gaussian_10_photon_count_160', 'log_every': 10}, '_wandb': {}}
+2026-02-25 01:52:40,883 INFO    MainThread:1784778 [wandb_init.py:init():861] starting backend
+2026-02-25 01:52:41,094 INFO    MainThread:1784778 [wandb_init.py:init():864] sending inform_init request
+2026-02-25 01:52:41,098 INFO    MainThread:1784778 [wandb_init.py:init():872] backend started and connected
+2026-02-25 01:52:41,102 INFO    MainThread:1784778 [wandb_run.py:_label_probe_notebook():1330] probe notebook
+2026-02-25 01:52:41,105 INFO    MainThread:1784778 [wandb_init.py:init():942] updated telemetry
+2026-02-25 01:52:41,113 INFO    MainThread:1784778 [wandb_init.py:init():966] communicating run to backend with 90.0 second timeout
+2026-02-25 01:52:41,722 INFO    MainThread:1784778 [wandb_init.py:init():1017] starting run threads in backend
+2026-02-25 01:52:41,844 INFO    MainThread:1784778 [wandb_run.py:_console_start():2506] atexit reg
+2026-02-25 01:52:41,844 INFO    MainThread:1784778 [wandb_run.py:_redirect():2354] redirect: wrap_raw
+2026-02-25 01:52:41,844 INFO    MainThread:1784778 [wandb_run.py:_redirect():2423] Wrapping output streams.
+2026-02-25 01:52:41,844 INFO    MainThread:1784778 [wandb_run.py:_redirect():2446] Redirects installed.
+2026-02-25 01:52:41,846 INFO    MainThread:1784778 [wandb_init.py:init():1057] run started, returning control to user process
+2026-02-25 01:53:32,342 INFO    MainThread:1784778 [wandb_run.py:_finish():2272] finishing run julia_mathew-university-of-california-berkeley/e2e_imaging/w61fvrwt
+2026-02-25 01:53:32,388 INFO    MainThread:1784778 [jupyter.py:save_history():480] not saving jupyter history
+2026-02-25 01:53:32,388 INFO    MainThread:1784778 [jupyter.py:save_ipynb():404] not saving jupyter notebook
+2026-02-25 01:53:32,388 INFO    MainThread:1784778 [wandb_init.py:_jupyter_teardown():590] cleaning up jupyter logic
+2026-02-25 01:53:32,388 INFO    MainThread:1784778 [wandb_run.py:_atexit_cleanup():2471] got exitcode: 0
+2026-02-25 01:53:32,389 INFO    MainThread:1784778 [wandb_run.py:_restore():2453] restore
+2026-02-25 01:53:32,389 INFO    MainThread:1784778 [wandb_run.py:_restore():2459] restore done
+2026-02-25 01:53:33,912 INFO    MainThread:1784778 [wandb_run.py:_footer_sync_info():3867] logging synced files
