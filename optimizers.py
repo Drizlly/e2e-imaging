@@ -58,9 +58,9 @@ class E2EOptimizer:
         return jnp.array(batch)
 
     # @eqx.filter_jit
-    def step(self, model, x_batch, opt_state):
+    def step(self, model, x_batch, opt_state, key):
         def loss_fn(model):
-            x_hat, y, psf = model(x_batch)
+            x_hat, y, psf = model(x_batch, key)
             return jnp.mean((x_hat - x_batch) ** 2)
 
         loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
@@ -76,7 +76,10 @@ class E2EOptimizer:
         num_steps: int,
         log_every: int = 50,
         visualize_every: int = 200,
+        key: Optional[jax.random.PRNGKey] = None
     ):
+        key = jax.random.PRNGKey(0) if key is None else key
+
         if self.use_wandb:
             wandb.init(project=self.project_name, name=self.run_name, config=self.wandb_config)
 
@@ -84,8 +87,9 @@ class E2EOptimizer:
         sample_batch = None
 
         for step in tqdm(range(num_steps)):
-
+            key, subkey = jax.random.split(key)
             # get next batch, restart iterator if exhausted
+
             try:
                 batch = next(data_iter)
             except StopIteration:
@@ -93,11 +97,10 @@ class E2EOptimizer:
                 batch = next(data_iter)
 
 
-
             x_batch = self._convert_batch(batch)
             if step == 0:
                 sample_batch = x_batch
-            self.model, self.opt_state, loss = self.step(self.model, x_batch, self.opt_state)
+            self.model, self.opt_state, loss = self.step(self.model, x_batch, self.opt_state, subkey)
 
             # normalize PSF after each step
             self.model = eqx.tree_at(
@@ -106,7 +109,7 @@ class E2EOptimizer:
                 self.model.psf_module.normalize_psf()
             )
 
-            if step % log_every == 0:
+            if step % log_every == 0 or step == num_steps - 1:
                 K_val = float(jnp.exp(self.model.log_K))
                 loss_val = float(loss)
                 print(f"step {step}/{num_steps}  loss={loss_val:.6f}  K={K_val:.6f}")
@@ -114,13 +117,13 @@ class E2EOptimizer:
                 if self.use_wandb:
                     wandb.log({'loss': loss_val, 'K': K_val, 'step': step})
 
-            if sample_batch is not None and step % visualize_every == 0:
+            if sample_batch is not None and (step % visualize_every == 0 or step == num_steps - 1):
                 self._visualize(sample_batch, step)
 
         if self.use_wandb:
             K_val = float(jnp.exp(self.model.log_K))
             loss_val = float(loss)
-            
+
             if self.use_wandb:
                 wandb.log({'loss': loss_val, 'K': K_val, 'step': step})
 
@@ -142,8 +145,10 @@ class E2EOptimizer:
         axarr[1].imshow(y_np,     cmap='gray'); axarr[1].set_title("y (meas)")
         axarr[2].imshow(x_hat_np, cmap='gray'); axarr[2].set_title("x_hat")
         axarr[3].imshow(psf_np,   cmap='gray'); axarr[3].set_title("PSF")
+
         plt.suptitle(f"Step {step}")
         plt.tight_layout()
+        print("CORNER VAL:", y_np[31][31] )
 
         if self.use_wandb:
             wandb.log({'viz': wandb.Image(fig), 'step': step})
