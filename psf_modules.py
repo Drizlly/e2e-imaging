@@ -1,6 +1,7 @@
-from typing import Tuple, Optional
+import numpy as np
 import jax
 import jax.numpy as jnp
+from jax import lax
 from jax import random
 import equinox as eqx
 from typing import Tuple, Optional
@@ -17,7 +18,7 @@ class RMLPSFLayer(eqx.Module):
     psf_padding: tuple
     num_gaussians: int
     grid: jnp.ndarray # cached coordinate grid 
-    psf_shape: tuple # static PSF shape
+    psf_shape: tuple # static PSF shape (K, L)
     measurement_bias: float # static measurement bias
 
     def __init__(self, object_size: int, num_gaussians: int, psf_size: Tuple[int, int] = (32, 32), measurement_bias: Optional[float] = 0.0, key: Optional[jax.random.PRNGKey] = None):
@@ -134,3 +135,32 @@ class RMLPSFLayer(eqx.Module):
             self,
             (new_covs, normalized_weights, means),
         )
+    
+    def convolve2D(self, psf: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+        psf = psf[::-1, ::-1]
+        K, L = psf.shape
+
+        # Pad fully so conv_valid gives the 'full' result
+        x_padded = jnp.pad(x, ((0,0), (K-1, K-1), (L-1, L-1)))
+        x4 = x_padded[:, :, :, None]
+        k4 = psf[:, :, None, None]
+
+        y4 = lax.conv_general_dilated(
+            lhs=x4,
+            rhs=k4,
+            window_strides=(1, 1),
+            padding="VALID",
+            dimension_numbers=("NHWC", "HWIO", "NHWC"),
+        )
+        # y4 shape is now (B, H+K-1, W+L-1, 1) — the full convolution output
+
+        # Crop to original size, matching scipy's 'same' anchor
+        crop_h = (K - 1) // 2
+        crop_w = (L - 1) // 2
+        H, W = x.shape[1], x.shape[2]
+
+        return y4[:, crop_h:crop_h+H, crop_w:crop_w+W, 0]
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        psf = self.compute_psf()
+        return psf, self.convolve2D(psf, x) 
