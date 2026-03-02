@@ -148,8 +148,7 @@ class E2EOptimizer:
 
         plt.suptitle(f"Step {step}")
         plt.tight_layout()
-        print("CORNER VAL:", y_np[31][31] )
-
+        
         if self.use_wandb:
             wandb.log({'viz': wandb.Image(fig), 'step': step})
 
