@@ -41,14 +41,14 @@ class E2EOptimizer:
         # )
         self.optimizer = optax.adam(lr) #TODO: do i need two learning rates, one for PSF, and one for wiener?
         self.opt_state = self.optimizer.init(eqx.filter(model, eqx.is_array))
+        # self.opt_state = self.optimizer.init(eqx.filter(model, eqx.is_array))
 
     def _make_labels(self, model):
-        # returns a pytree with same structure as model,
-        # where each leaf is labeled 'psf' or 'K'
-        return jax.tree_util.tree_map_with_path(
-            lambda path, leaf: 'K' if 'log_K' in str(path) else 'psf',
-            eqx.filter(model, eqx.is_array)
-        )
+        params = eqx.filter(model, eqx.is_array)
+        # walk the pytree and label each leaf
+        leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
+        labels = ['K' if 'log_K' in str(path) else 'psf' for path, leaf in leaves]
+        return treedef.unflatten(labels)
 
     def _convert_batch(self, batch):
         if isinstance(batch, (tuple, list)):
@@ -110,7 +110,7 @@ class E2EOptimizer:
             )
 
             if step % log_every == 0 or step == num_steps - 1:
-                K_val = float(jnp.exp(self.model.log_K))
+                K_val = float(jnp.exp(self.model.reconstruction_module.log_K))
                 loss_val = float(loss)
                 print(f"step {step}/{num_steps}  loss={loss_val:.6f}  K={K_val:.6f}")
 
@@ -121,7 +121,7 @@ class E2EOptimizer:
                 self._visualize(sample_batch, step)
 
         if self.use_wandb:
-            K_val = float(jnp.exp(self.model.log_K))
+            K_val = float(jnp.exp(self.model.reconstruction_module.log_K))
             loss_val = float(loss)
 
             if self.use_wandb:
