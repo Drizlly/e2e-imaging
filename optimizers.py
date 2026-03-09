@@ -14,9 +14,9 @@ class E2EOptimizer:
     def __init__(
         self,
         model,                    # your E2E model
-        # lr_psf: float = 1e-3,    # learning rate for PSF parameters
-        # lr_K: float = 1e-3,      # learning rate for K
-        lr = 1e-3,
+        lr_psf: float = 1e-3,    # learning rate for PSF parameters
+        lr_recon: float = 1e-3,      # learning rate for K
+        # lr = 1e-3,
         use_wandb: bool = True,
         project_name: str = 'e2e_imaging',
         run_name: str = 'run_1',
@@ -30,24 +30,44 @@ class E2EOptimizer:
         if use_wandb:
             self.wandb_config = wandb_config
 
+        # def make_labels(params):
+        #     leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
+        #     labels = []
+        #     for path, _ in leaves:
+        #         has_log_K = any(
+        #             isinstance(k, jax.tree_util.GetAttrKey) and k.name == 'log_K'
+        #             for k in path
+        #         )
+        #         labels.append('K' if has_log_K else 'psf')
+        #     return treedef.unflatten(labels)
+
         # separate learning rates for PSF params vs log_K
-        # self.optimizer = optax.multi_transform(
-        #     {
-        #         'psf': optax.adam(lr_psf),
-        #         'K':   optax.adam(lr_K),
-        #     },
-        #     # label each leaf by which optimizer it should use
-        #     param_labels=self._make_labels(model)
-        # )
-        self.optimizer = optax.adam(lr) #TODO: do i need two learning rates, one for PSF, and one for wiener?
+        self.optimizer = optax.multi_transform(
+            {
+                'psf': optax.adam(lr_psf),
+                'recon':   optax.adam(lr_recon),
+            },
+            # label each leaf by which optimizer it should use
+            param_labels=self._make_labels
+        )
+        # self.optimizer = optax.adam(lr) #TODO: do i need two learning rates, one for PSF, and one for wiener?
         self.opt_state = self.optimizer.init(eqx.filter(model, eqx.is_array))
         # self.opt_state = self.optimizer.init(eqx.filter(model, eqx.is_array))
 
     def _make_labels(self, model):
         params = eqx.filter(model, eqx.is_array)
-        # walk the pytree and label each leaf
         leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
-        labels = ['K' if 'log_K' in str(path) else 'psf' for path, leaf in leaves]
+
+        labels = []
+        for path, _ in leaves:
+            path_str = str(path)
+
+            if "psf_module" in path_str:
+                labels.append("psf")
+            elif "reconstruction_module" in path_str:
+                labels.append("recon")
+            else:
+                raise ValueError(f"Unrecognized parameter path: {path_str}")
         return treedef.unflatten(labels)
 
     def _convert_batch(self, batch):
@@ -110,22 +130,25 @@ class E2EOptimizer:
             )
 
             if step % log_every == 0 or step == num_steps - 1:
-                K_val = float(jnp.exp(self.model.reconstruction_module.log_K))
+                # K_val = float(jnp.exp(self.model.reconstruction_module.log_)) # TODO: print K when using Wiener deconv
                 loss_val = float(loss)
-                print(f"step {step}/{num_steps}  loss={loss_val:.6f}  K={K_val:.6f}")
+                # print(f"step {step}/{num_steps}  loss={loss_val:.6f}  K={K_val:.6f}")
+                print(f"step {step}/{num_steps}  loss={loss_val:.6f}")
 
                 if self.use_wandb:
-                    wandb.log({'loss': loss_val, 'K': K_val, 'step': step})
+                    # wandb.log({'loss': loss_val, 'K': K_val, 'step': step})
+                    wandb.log({'loss': loss_val, 'step': step})
 
             if sample_batch is not None and (step % visualize_every == 0 or step == num_steps - 1):
                 self._visualize(sample_batch, step)
 
         if self.use_wandb:
-            K_val = float(jnp.exp(self.model.reconstruction_module.log_K))
+            # K_val = float(jnp.exp(self.model.reconstruction_module.log_K)) # TODO: print K when using Wiener deconv
             loss_val = float(loss)
 
             if self.use_wandb:
-                wandb.log({'loss': loss_val, 'K': K_val, 'step': step})
+                # wandb.log({'loss': loss_val, 'K': K_val, 'step': step})
+                wandb.log({'loss': loss_val, 'step': step})
 
             self._visualize(sample_batch, step)
             wandb.finish()

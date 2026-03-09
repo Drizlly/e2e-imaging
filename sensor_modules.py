@@ -74,7 +74,7 @@ class SensorModule(eqx.Module):
         
         return jnp.asarray(sensor_mask)
     
-    def add_sensor_array(self, images):
+    def apply_sensor_array(self, images):
         sensor_array = self.create_sensor_array()
         assert images.shape[-2:] == sensor_array.shape, \
             f"Input images {images.shape} don't match sensor array {sensor_array.shape}"
@@ -89,6 +89,6 @@ class SensorModule(eqx.Module):
         
         masked_images = noisy_images
         if self.sensor_array_enabled:
-            masked_images = self.add_sensor_array(images)
+            masked_images = self.apply_sensor_array(images)
 
         return masked_images

@@ -17,7 +17,7 @@ class RMLPSFLayer(eqx.Module):
     obj_padding: tuple
     psf_padding: tuple
     num_gaussians: int
-    grid: jnp.ndarray # cached coordinate grid 
+    grid: jnp.ndarray # cached coordinate grid  #TODO: QUESTION... should this be static??
     psf_shape: tuple # static PSF shape (K, L)
     measurement_bias: float # static measurement bias
 
