@@ -48,7 +48,7 @@ class SensorModule(eqx.Module):
             params = self.sensor_array_params
 
         H, W = params.get('H', 96), params.get('W', 96)
-        rows, cols = params.get('rows', 5), params.get('columns', 4)  # number of sensors vertically and horizontally
+        rows, cols = params.get('rows', 5), params.get('cols', 4)  # number of sensors vertically and horizontally
         sensor_h, sensor_w = params.get('sensor_h', 10), params.get('sensor_w', 15) # each sensor block size
         spacing_y, spacing_x = params.get('spacing_y', 8), params.get('spacing_x', 10)  # more vertical spacing between rows
 
