@@ -8,6 +8,7 @@ import tensorflow as tf
 import numpy as np
 from tqdm import tqdm
 from typing import Optional
+from scipy import ndimage
 
 
 class E2EOptimizer:
@@ -20,13 +21,16 @@ class E2EOptimizer:
         use_wandb: bool = True,
         project_name: str = 'e2e_imaging',
         run_name: str = 'run_1',
-        wandb_config: dict = {}
-
+        wandb_config: dict = {},
+        val_dataset: Optional[tf.data.Dataset] = None,
+        test_dataset: Optional[tf.data.Dataset] = None
     ):
         self.model = model
         self.use_wandb = use_wandb
         self.project_name = project_name
         self.run_name = run_name
+        self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
         if use_wandb:
             self.wandb_config = wandb_config
 
@@ -76,6 +80,17 @@ class E2EOptimizer:
         if hasattr(batch, "numpy"):
             batch = batch.numpy()
         return jnp.array(batch)
+    
+    def _compute_loss(self, dataset, key):
+        total_loss = 0.0
+        num_batches = 0
+        for batch in dataset:
+            key, subkey = jax.random.split(key)
+            x_batch = self._convert_batch(batch)
+            x_hat, y, psf = self.model(x_batch, subkey)
+            total_loss += float(jnp.mean((x_hat - x_batch) ** 2))
+            num_batches += 1
+        return total_loss / num_batches
 
     # @eqx.filter_jit
     def step(self, model, x_batch, opt_state, key):
@@ -132,26 +147,30 @@ class E2EOptimizer:
             if step % log_every == 0 or step == num_steps - 1:
                 # K_val = float(jnp.exp(self.model.reconstruction_module.log_)) # TODO: print K when using Wiener deconv
                 loss_val = float(loss)
+                log_dict = {'train/loss': loss_val, 'step':step}
                 # print(f"step {step}/{num_steps}  loss={loss_val:.6f}  K={K_val:.6f}")
-                print(f"step {step}/{num_steps}  loss={loss_val:.6f}")
+                msg = f"step {step}/{num_steps}  loss={loss_val:.6f}"
 
+                if self.val_dataset is not None:
+                    key, subkey = jax.random.split(key)
+                    val_loss = self._compute_loss(self.val_dataset, subkey)
+                    log_dict['val/loss'] = val_loss
+                    msg += f"  val_loss={val_loss:.6f}"
+
+                print(msg)
                 if self.use_wandb:
-                    # wandb.log({'loss': loss_val, 'K': K_val, 'step': step})
-                    wandb.log({'loss': loss_val, 'step': step})
+                    wandb.log(log_dict)
 
             if sample_batch is not None and (step % visualize_every == 0 or step == num_steps - 1):
                 self._visualize(sample_batch, step)
-
-        if self.use_wandb:
-            # K_val = float(jnp.exp(self.model.reconstruction_module.log_K)) # TODO: print K when using Wiener deconv
-            loss_val = float(loss)
-
+        
+        if self.test_dataset is not None:
+            key, subkey = jax.random.split(key)
+            test_loss = self._compute_loss(self.test_dataset, subkey)
+            print(f"final test loss: {test_loss:.6f}")
             if self.use_wandb:
-                # wandb.log({'loss': loss_val, 'K': K_val, 'step': step})
-                wandb.log({'loss': loss_val, 'step': step})
-
-            self._visualize(sample_batch, step)
-            wandb.finish()
+                wandb.log({'test/loss': test_loss, 'step': num_steps})
+                wandb.summary['test_loss'] = test_loss
 
         return self.model
 
@@ -162,18 +181,25 @@ class E2EOptimizer:
         y_np     = np.array(y[0])
         x_hat_np = np.array(x_hat[0])
         psf_np   = np.array(psf)
+        mask = psf_np > 0.001
+        labeled, num_lenslets = ndimage.label(mask)
 
-        fig, axarr = plt.subplots(1, 4, figsize=(16, 4))
-        axarr[0].imshow(x_np,     cmap='gray'); axarr[0].set_title("x (GT)")
-        axarr[1].imshow(y_np,     cmap='gray'); axarr[1].set_title("y (meas)")
-        axarr[2].imshow(x_hat_np, cmap='gray'); axarr[2].set_title("x_hat")
-        axarr[3].imshow(psf_np,   cmap='gray'); axarr[3].set_title("PSF")
+        fig, axarr = plt.subplots(1, 5, figsize=(16, 5), constrained_layout=True)
+        im0 = axarr[0].imshow(x_np,     cmap='gray'); axarr[0].set_title("x (GT)")
+        im1 = axarr[1].imshow(y_np,     cmap='gray'); axarr[1].set_title("y (meas)")
+        im2 = axarr[2].imshow(x_hat_np, cmap='gray'); axarr[2].set_title("x_hat")
+        im3 = axarr[3].imshow(psf_np,   cmap='gray'); axarr[3].set_title("PSF")
+        im4 = axarr[4].imshow(mask,     cmap='gray'); axarr[4].set_title("Mask (> 0.001)")
 
-        plt.suptitle(f"Step {step}")
-        plt.tight_layout()
+        for ax, im in zip(axarr, [im0, im1, im2, im3, im4]):
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        fig.suptitle(f"Step {step}")
+        # plt.subplots_adjust(top=0.88, wspace=0.4) 
         
         if self.use_wandb:
             wandb.log({'viz': wandb.Image(fig), 'step': step})
 
         plt.show()
         plt.close(fig)
+

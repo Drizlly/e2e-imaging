@@ -85,7 +85,8 @@ class SensorModule(eqx.Module):
         key = jax.random.PRNGKey(0) if key is None else key
         noisy_images = images
         if self.noise_enabled:
-            noisy_images = self.add_noise(images, key=key, ensure_positive=ensure_positive)
+            keys = jax.random.split(key, images.shape[0])
+            noisy_images = jax.vmap(self.add_noise)(images, keys)
         
         masked_images = noisy_images
         if self.sensor_array_enabled:

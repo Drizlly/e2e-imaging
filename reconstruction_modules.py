@@ -3,34 +3,36 @@ import jax.numpy as jnp
 import equinox as eqx
 from typing import Tuple
 
-BN_EPS = 1e-4
+LN_EPS = 1e-4
 
-class ConvBnRelu2d(eqx.Module):
+# ADAPTED FROM LENSLESS LEARNING PAPER: PUT LINK
+
+class ConvLnRelu2d(eqx.Module):
     conv: eqx.nn.Conv2d
     ln: eqx.nn.LayerNorm
     
     def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, key=None):
         self.conv = eqx.nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, use_bias=False, key=key)
         # self.bn = eqx.nn.BatchNorm(out_channels, axis_name="batch", eps=BN_EPS)
-        self.ln = eqx.nn.LayerNorm(out_channels, eps=BN_EPS) # TODO: SWITCHED TO LAYER NORM
+        self.ln = eqx.nn.LayerNorm(out_channels, eps=LN_EPS) 
     
     def __call__(self, x):
         x = self.conv(x)
         # x, state = self.bn(x, state, inference=inference)
         # x = jax.vmap(self.ln)(x)  # apply layernorm across spatial dims
-        x = jax.vmap(jax.vmap(self.ln, in_axes=1, out_axes=1), in_axes=1, out_axes=1)(x) # TODO: CHECK THIS???
+        x = jax.vmap(jax.vmap(self.ln, in_axes=1, out_axes=1), in_axes=1, out_axes=1)(x) # TODO: can you do this vmap in oen go
         x = jax.nn.relu(x)
         return x
 
 class StackEncoder(eqx.Module):
-    conv1: ConvBnRelu2d
-    conv2: ConvBnRelu2d
+    conv1: ConvLnRelu2d
+    conv2: ConvLnRelu2d
 
     def __init__(self, in_channels, out_channels, kernel_size=3, key=None):
         padding = (kernel_size - 1) // 2
         k1, k2 = jax.random.split(key)
-        self.conv1 = ConvBnRelu2d(in_channels, out_channels, kernel_size, padding, key=k1) # TODO: look into why this needs a key!
-        self.conv2 = ConvBnRelu2d(out_channels, out_channels, kernel_size, padding, key=k2)
+        self.conv1 = ConvLnRelu2d(in_channels, out_channels, kernel_size, padding, key=k1) # TODO: look into why this needs a key!
+        self.conv2 = ConvLnRelu2d(out_channels, out_channels, kernel_size, padding, key=k2)
 
     def __call__(self, x): #TODO: what does inference do?
         x = self.conv1(x)
@@ -39,16 +41,16 @@ class StackEncoder(eqx.Module):
         return x, x_small
 
 class StackDecoder(eqx.Module):
-    conv1: ConvBnRelu2d
-    conv2: ConvBnRelu2d
-    conv3: ConvBnRelu2d
+    conv1: ConvLnRelu2d
+    conv2: ConvLnRelu2d
+    conv3: ConvLnRelu2d
 
     def __init__(self, in_channels, out_channels, kernel_size=3, key=None):
         padding = (kernel_size - 1) // 2
         k1, k2, k3 = jax.random.split(key, 3)
-        self.conv1 = ConvBnRelu2d(in_channels, out_channels, kernel_size, padding, key=k1)
-        self.conv2 = ConvBnRelu2d(out_channels, out_channels, kernel_size, padding, key=k2)
-        self.conv3 = ConvBnRelu2d(out_channels, out_channels, kernel_size, padding, key=k3)
+        self.conv1 = ConvLnRelu2d(in_channels, out_channels, kernel_size, padding, key=k1)
+        self.conv2 = ConvLnRelu2d(out_channels, out_channels, kernel_size, padding, key=k2)
+        self.conv3 = ConvLnRelu2d(out_channels, out_channels, kernel_size, padding, key=k3)
 
     def __call__(self, x, down_tensor):
         _, height, width = down_tensor.shape  # (C, H, W) in eqx
@@ -71,7 +73,7 @@ class UNetDeconv(eqx.Module):
     down3: StackEncoder
     down4: StackEncoder
     down5: StackEncoder
-    center: ConvBnRelu2d
+    center: ConvLnRelu2d
     up5: StackDecoder
     up4: StackDecoder
     up3: StackDecoder
@@ -86,7 +88,7 @@ class UNetDeconv(eqx.Module):
         self.down3 = StackEncoder(64,  128, kernel_size=3, key=keys[2])
         self.down4 = StackEncoder(128, 256, kernel_size=3, key=keys[3])
         self.down5 = StackEncoder(256, 512, kernel_size=3, key=keys[4])
-        self.center = ConvBnRelu2d(512, 512, kernel_size=3, padding=1, key=keys[5])
+        self.center = ConvLnRelu2d(512, 512, kernel_size=3, padding=1, key=keys[5])
         self.up5 = StackDecoder(512+512, 256, kernel_size=3, key=keys[6])
         self.up4 = StackDecoder(256+256, 128, kernel_size=3, key=keys[7])
         self.up3 = StackDecoder(128+128, 64,  kernel_size=3, key=keys[8])
@@ -117,6 +119,30 @@ class UNetDeconv(eqx.Module):
     def __call__(self, x, psf):
         return jax.vmap(self._single_forward)(x)
 
+class UNetDeconv_small(eqx.Module):
+    down1: StackEncoder
+    center: ConvLnRelu2d
+    up1: StackDecoder
+    classify: eqx.nn.Conv2d
+
+    def __init__(self, key=None):
+        keys = jax.random.split(key, 4)
+        self.down1 = StackEncoder(1,   24,  kernel_size=3, key=keys[0])
+        self.center = ConvLnRelu2d(24, 24, kernel_size=3, padding=1, key=keys[1])
+        self.up1 = StackDecoder(24+24,   24,  kernel_size=3, key=keys[2])
+        self.classify = eqx.nn.Conv2d(24, 1, kernel_size=1, use_bias=True, key=keys[3])
+    
+    def _single_forward(self, x):
+        x = x[None, ...]
+        down1, out = self.down1(x)
+        out = self.center(out)
+        out = self.up1(out, down1)
+        out = self.classify(out)
+        out = jnp.squeeze(out, axis=0)
+        return out
+
+    def __call__(self, x, psf):
+        return jax.vmap(self._single_forward)(x)
 
 
 class WienerDeconv(eqx.Module):
