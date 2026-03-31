@@ -52,7 +52,7 @@ class LenslessDataGenerator:
         x_test = x_test.astype('float32')
         # x_test = x_test / jnp.mean(x_test)
         # x_test = x_test * self.mean_photon_count
-        x_test = x_test / x_train.max()
+        x_test = x_test / x_test.max()
 
         return x_train, x_test 
 
