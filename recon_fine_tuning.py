@@ -15,9 +15,10 @@
 # %%
 import os
 import sys
+import optax
 # set gpu to be pci bus id
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '4'
 # os.environ["JAX_PLATFORM_NAME"] = "cpu"
 # set gpu memory usage and turnoff pre-allocated memory TODO: what does the following do??
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] ='false'
@@ -73,7 +74,9 @@ class E2E(eqx.Module):
 
 # %%
 # general
-seed_value = 42 #TODO: FIX SEEDING
+lr_psf = 1e-2
+lr_recon = 1e-3
+seed_value = 10 #TODO: FIX SEEDING
 key = jax.random.PRNGKey(seed_value)
 
 # loading images
@@ -85,12 +88,9 @@ photon_count = 160
 subset_fraction = 0.9
 
 # psf stuff constants
-lr_psf_means = 1e-4
-lr_psf_covs = 1e-4
-lr_psf_weights = 1e-4
 psf_size = (32, 32)
 object_size = 32
-num_gaussians = 10
+num_gaussians = 3
 use_ideal = False
 
 # sensor stuff
@@ -101,28 +101,28 @@ gaussian_sigma = 0.5
 sensor_array_params = {
     "H": 96,
     "W": 96, 
-    "rows": 1,
-    "cols": 2,
-    "sensor_h": 25,
-    "sensor_w": 30,
-    "spacing_y": 20,
-    "spacing_x": 20
+    "rows": 3,
+    "cols": 3,
+    "sensor_h": 15,
+    "sensor_w": 20,
+    "spacing_y": 15,
+    "spacing_x": 12
 }
 
 # recon stuff
 recon_name = 'unet_small'
 log_K = jnp.array(-4.0) #initial starting K value for wiener deconv
-lr_recon = 1e-2
 
 # train stuff
-num_steps = 1000
-visualize_every = 50
+num_steps = 10000
+visualize_every = 500
 
 #wandb logging stuff
 use_wandb = False
-project_name = 'e2e_imaging_playground'
-run_name = f'TEST_{dataset_name}_recon_{recon_name}_ideal_init_{use_ideal}_gaussian_sigma_{gaussian_sigma}_photon_count_{photon_count}_num_gaussian_{num_gaussians}'
-log_every = 10
+# project_name = 'e2e_imaging_playground'
+project_name = 'e2e_fine_tuning_playground'
+run_name = f'{dataset_name}_recon_{recon_name}_ideal_init_{use_ideal}_lr_recon_{lr_recon}_gaussian_sigma_{gaussian_sigma}_photon_count_{photon_count}_num_gaussian_{num_gaussians}'
+log_every = 50
 
 # %%
 # load images!
@@ -148,9 +148,24 @@ x_train[0].shape[0] * tile_rows
 # %%
 # the model (psf layer)
 key, subkey = jax.random.split(key) # TODO: replace this with self.next_rng_key()??
-psf_module_fixed = RMLPSFLayer(object_size=96, num_gaussians=num_gaussians, psf_size=psf_size, key=subkey)
+psf_module = RMLPSFLayer(object_size=96, num_gaussians=num_gaussians, psf_size=psf_size, key=subkey)
+
+if use_ideal:
+    params = np.load("/home/juliama/wallerlab/e2e-imaging/ideal_psfs/optimized_psf_params.npz")
+
+    psf_module = eqx.tree_at(
+        lambda m: (m.means, m.covs, m.weights),
+        psf_module,
+        (
+            jnp.array(params['means']),
+            jnp.array(params['covs']),
+            jnp.array(params['weights'])
+        )
+    )
 
 # %%
+
+# psf_module = RMLPSFLayer(object_size=32, num_gaussians=10, psf_size=psf_size, key=subkey_1)
 sensor_module = SensorModule(photon_count=photon_count, 
                              noise_enabled=noise_enabled,
                              sensor_array_enabled=sensor_array_enabled, 
@@ -174,45 +189,35 @@ def train_step(model, x_batch, opt_state, optimizer, key):
 
 
 # %%
-for lr_weights in [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]:
-    # reinitialize fresh model each time
+for lr in [1e-4, 1e-3, 1e-2, 1e-1]:
+    # reinitialize model and optimizer
     key, subkey = jax.random.split(key)
-    reconstruction_module = UNetDeconv_small(key=subkey)
-    model_test = E2E(psf_module=psf_module_fixed, sensor_module=sensor_module, reconstruction_module=reconstruction_module)
+    reconstruction_module = UNetDeconv_small(key=subkey)  # fresh UNet weights
+    model_test = E2E(psf_module=psf_module, sensor_module=sensor_module, reconstruction_module=reconstruction_module)
+    
+    optimizer_test = optax.adam(lr)
+    opt_state_test = optimizer_test.init(eqx.filter(model_test, eqx.is_array))
 
-    optimizer_test = E2EOptimizer(
-        model=model_test,
-        lr_psf_means=1e-2,
-        lr_psf_weights=lr_weights,
-        freeze_psf_covs=True,
-        freeze_psf_weights=False,
-        lr_recon=1e-3, 
-        use_wandb=False,
-    )
-
+    
     losses = []
     data_iter = iter(train_dataset)
-    for step in range(200):
+    for step in range(650):
         key, subkey = jax.random.split(key)
         try:
             batch = next(data_iter)
         except StopIteration:
             data_iter = iter(train_dataset)
             batch = next(data_iter)
-
-        x_batch = optimizer_test._convert_batch(batch)
-        model_test, opt_state_test, loss = train_step(
-            model_test, x_batch, optimizer_test.opt_state, optimizer_test.optimizer, subkey
-        )
-        optimizer_test.opt_state = opt_state_test  # keep opt_state in sync
+        x_batch = jnp.array(batch.numpy())
+        model_test, opt_state_test, loss = train_step(model_test, x_batch, opt_state_test, optimizer_test, subkey)
         losses.append(float(loss))
-
-    print(f'lr_weights={lr_weights} complete')
-    plt.plot(losses, label=f'lr_means={lr_weights}')
+    
+    print(f'lr_{lr}_complete')
+    plt.plot(losses, label=f'lr={lr}')
 
 plt.legend()
 plt.xlabel('step')
 plt.ylabel('loss')
-plt.title('PSF weights LR sweep')
-plt.savefig('lr_weights_sweep.png', dpi=150, bbox_inches='tight')
+plt.title('Loss curves for different LRs')
+plt.savefig('lr_range_test.png', dpi=150, bbox_inches='tight')
 plt.show()

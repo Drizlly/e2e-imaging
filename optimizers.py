@@ -15,15 +15,19 @@ class E2EOptimizer:
     def __init__(
         self,
         model,                    # your E2E model
-        lr_psf: float = 1e-3,    # learning rate for PSF parameters
-        lr_recon: float = 1e-3,      # learning rate for K
+        lr_psf_means: float = 1e-2,
+        lr_psf_covs: float = 1e-3,
+        lr_psf_weights: float = 1e-4, 
+        lr_recon: float = 1e-3,
         # lr = 1e-3,
-        use_wandb: bool = True,
+        use_wandb: bool = False,
         project_name: str = 'e2e_imaging',
         run_name: str = 'run_1',
         wandb_config: dict = {},
         val_dataset: Optional[tf.data.Dataset] = None,
-        test_dataset: Optional[tf.data.Dataset] = None
+        test_dataset: Optional[tf.data.Dataset] = None,
+        freeze_psf_covs=False,
+        freeze_psf_weights=False,
     ):
         self.model = model
         self.use_wandb = use_wandb
@@ -48,15 +52,16 @@ class E2EOptimizer:
         # separate learning rates for PSF params vs log_K
         self.optimizer = optax.multi_transform(
             {
-                'psf': optax.adam(lr_psf),
+                'psf_means': optax.adam(lr_psf_means),
+                'psf_covs':    optax.set_to_zero() if freeze_psf_covs else optax.adam(lr_psf_covs),
+                'psf_weights':  optax.set_to_zero() if freeze_psf_weights else optax.adam(lr_psf_weights),
                 'recon':   optax.adam(lr_recon),
             },
             # label each leaf by which optimizer it should use
             param_labels=self._make_labels
         )
-        # self.optimizer = optax.adam(lr) #TODO: do i need two learning rates, one for PSF, and one for wiener?
         self.opt_state = self.optimizer.init(eqx.filter(model, eqx.is_array))
-        # self.opt_state = self.optimizer.init(eqx.filter(model, eqx.is_array))
+
 
     def _make_labels(self, model):
         params = eqx.filter(model, eqx.is_array)
@@ -67,7 +72,14 @@ class E2EOptimizer:
             path_str = str(path)
 
             if "psf_module" in path_str:
-                labels.append("psf")
+                if "means" in path_str:
+                    labels.append("psf_means")
+                elif "covs" in path_str:
+                    labels.append("psf_covs")
+                elif "weights" in path_str:
+                    labels.append("psf_weights")
+                else:
+                    labels.append("psf_means")
             elif "reconstruction_module" in path_str:
                 labels.append("recon")
             else:
