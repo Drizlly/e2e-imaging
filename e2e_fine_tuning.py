@@ -85,9 +85,9 @@ photon_count = 160
 subset_fraction = 0.9
 
 # psf stuff constants
-lr_psf_means = 1e-4
+lr_psf_means = 5e-1
 lr_psf_covs = 1e-4
-lr_psf_weights = 1e-4
+lr_psf_weights = 5e-3
 psf_size = (32, 32)
 object_size = 32
 num_gaussians = 10
@@ -101,12 +101,12 @@ gaussian_sigma = 0.5
 sensor_array_params = {
     "H": 96,
     "W": 96, 
-    "rows": 1,
+    "rows": 2,
     "cols": 2,
     "sensor_h": 25,
     "sensor_w": 30,
-    "spacing_y": 20,
-    "spacing_x": 20
+    "spacing_y": 100,
+    "spacing_x": 100
 }
 
 # recon stuff
@@ -115,8 +115,8 @@ log_K = jnp.array(-4.0) #initial starting K value for wiener deconv
 lr_recon = 1e-2
 
 # train stuff
-num_steps = 1000
-visualize_every = 50
+num_steps = 10000
+visualize_every = 250
 
 #wandb logging stuff
 use_wandb = False
@@ -174,7 +174,8 @@ def train_step(model, x_batch, opt_state, optimizer, key):
 
 
 # %%
-for lr_weights in [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]:
+go_through = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+for lr_conv in go_through:
     # reinitialize fresh model each time
     key, subkey = jax.random.split(key)
     reconstruction_module = UNetDeconv_small(key=subkey)
@@ -182,14 +183,12 @@ for lr_weights in [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]:
 
     optimizer_test = E2EOptimizer(
         model=model_test,
-        lr_psf_means=1e-2,
-        lr_psf_weights=lr_weights,
-        freeze_psf_covs=True,
-        freeze_psf_weights=False,
+        lr_psf_means= lr_psf_means,
+        lr_psf_covs = lr_conv,
+        lr_psf_weights= lr_psf_weights,
         lr_recon=1e-3, 
         use_wandb=False,
     )
-
     losses = []
     data_iter = iter(train_dataset)
     for step in range(200):
@@ -207,12 +206,13 @@ for lr_weights in [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]:
         optimizer_test.opt_state = opt_state_test  # keep opt_state in sync
         losses.append(float(loss))
 
-    print(f'lr_weights={lr_weights} complete')
-    plt.plot(losses, label=f'lr_means={lr_weights}')
+    print(f'lr_conv={lr_conv} complete')
+    plt.plot(losses, label=f'lr_conv={lr_conv}')
 
 plt.legend()
+plt.ylim(0.06, 0.1)
 plt.xlabel('step')
 plt.ylabel('loss')
-plt.title('PSF weights LR sweep')
-plt.savefig('lr_weights_sweep.png', dpi=150, bbox_inches='tight')
+plt.title('PSF conv LR sweep')
+plt.savefig('lr_conv_sweep.png', dpi=150, bbox_inches='tight')
 plt.show()

@@ -116,6 +116,8 @@ class RMLPSFLayer(eqx.Module):
     def normalize_psf(self):
         """ Ensure weights sum to 1 and that covariance matrices are positive definite."""
         # ensure positive definite 
+        normalized_weights = jnp.clip(self.weights, a_min=1e-2)
+        normalized_weights = normalized_weights / normalized_weights.sum()
         sym_covs = (self.covs + self.covs.transpose(0, 2, 1)) / 2 
         min_eigenvalue = 1e-6 # small positive constant 
         eigvals, eigvecs = jnp.linalg.eigh(sym_covs)
@@ -124,8 +126,8 @@ class RMLPSFLayer(eqx.Module):
         eigvals = jnp.clip(eigvals, min_std**2, None) # This clip prevents super long-tailed streaks in the learned PSF. 1 works well and doesn't streak.
         new_covs = jnp.einsum("nij,nj,nkj->nik", eigvecs, eigvals, eigvecs) # TODO if any issues switch to the newer version of this? 
 
-        # normalize the weights 
-        normalized_weights = self.weights.clip(0) / jnp.sum(self.weights.clip(0) + 1e-10) 
+        # # normalize the weights 
+        # normalized_weights = self.weights.clip(0) / jnp.sum(self.weights.clip(0) + 1e-10) 
 
         # constrain the means to be within the PSF bounds 
         means = jnp.clip(self.means, -self.psf_shape[0] // 2*.8, self.psf_shape[0] // 2*.8)

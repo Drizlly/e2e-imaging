@@ -156,6 +156,7 @@ class E2EOptimizer:
                 self.model.psf_module.normalize_psf()
             )
 
+
             if step % log_every == 0 or step == num_steps - 1:
                 # K_val = float(jnp.exp(self.model.reconstruction_module.log_)) # TODO: print K when using Wiener deconv
                 loss_val = float(loss)
@@ -214,4 +215,5 @@ class E2EOptimizer:
 
         plt.show()
         plt.close(fig)
+
 
