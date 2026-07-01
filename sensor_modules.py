@@ -90,6 +90,6 @@ class SensorModule(eqx.Module):
         
         masked_images = noisy_images
         if self.sensor_array_enabled:
-            masked_images = self.apply_sensor_array(images)
+            masked_images = self.apply_sensor_array(noisy_images)
 
         return masked_images
