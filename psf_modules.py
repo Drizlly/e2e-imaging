@@ -163,6 +163,17 @@ class RMLPSFLayer(eqx.Module):
 
         return y4[:, crop_h:crop_h+H, crop_w:crop_w+W, 0]
 
+    def adjoint2D(self, psf: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+        """Apply the exact adjoint of ``convolve2D`` to a batch of images.
+
+        Building the adjoint from JAX's reverse-mode transform keeps its
+        padding and cropping exactly aligned with ``convolve2D``, including
+        for even-sized PSFs.
+        """
+        x0 = jnp.zeros_like(y)
+        _, pullback = jax.vjp(lambda x: self.convolve2D(psf, x), x0)
+        return pullback(y)[0]
+
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         psf = self.compute_psf()
         return psf, self.convolve2D(psf, x) 
