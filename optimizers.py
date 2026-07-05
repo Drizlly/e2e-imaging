@@ -28,6 +28,7 @@ class E2EOptimizer:
         test_dataset: Optional[tf.data.Dataset] = None,
         freeze_psf_covs=False,
         freeze_psf_weights=False,
+        recon_steps_per_psf_update: Optional[int] = None,
     ):
         self.model = model
         self.use_wandb = use_wandb
@@ -35,8 +36,15 @@ class E2EOptimizer:
         self.run_name = run_name
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
+        self.recon_steps_per_psf_update = recon_steps_per_psf_update
         if use_wandb:
             self.wandb_config = wandb_config
+
+        if (
+            recon_steps_per_psf_update is not None
+            and recon_steps_per_psf_update < 1
+        ):
+            raise ValueError("recon_steps_per_psf_update must be at least 1")
 
         # def make_labels(params):
         #     leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
@@ -49,13 +57,51 @@ class E2EOptimizer:
         #         labels.append('K' if has_log_K else 'psf')
         #     return treedef.unflatten(labels)
 
-        # separate learning rates for PSF params vs log_K
+        psf_means_optimizer = optax.adam(lr_psf_means)
+        psf_covs_optimizer = (
+            optax.set_to_zero()
+            if freeze_psf_covs
+            else optax.adam(lr_psf_covs)
+        )
+        psf_weights_optimizer = (
+            optax.set_to_zero()
+            if freeze_psf_weights
+            else optax.adam(lr_psf_weights)
+        )
+        recon_optimizer = optax.adam(lr_recon)
+
+        if recon_steps_per_psf_update is not None:
+            cycle_length = recon_steps_per_psf_update + 1
+
+            def is_recon_step(step):
+                return (step % cycle_length) < recon_steps_per_psf_update
+
+            def is_psf_step(step):
+                return (step % cycle_length) == recon_steps_per_psf_update
+
+            # When a group is inactive, emit zero updates and leave its Adam
+            # state unchanged. This produces N reconstruction-only updates
+            # followed by one PSF-only update.
+            recon_optimizer = optax.conditionally_mask(
+                recon_optimizer, is_recon_step
+            )
+            psf_means_optimizer = optax.conditionally_mask(
+                psf_means_optimizer, is_psf_step
+            )
+            psf_covs_optimizer = optax.conditionally_mask(
+                psf_covs_optimizer, is_psf_step
+            )
+            psf_weights_optimizer = optax.conditionally_mask(
+                psf_weights_optimizer, is_psf_step
+            )
+
+        # Separate learning rates and update schedules for PSF and recon params.
         self.optimizer = optax.multi_transform(
             {
-                'psf_means': optax.adam(lr_psf_means),
-                'psf_covs':    optax.set_to_zero() if freeze_psf_covs else optax.adam(lr_psf_covs),
-                'psf_weights':  optax.set_to_zero() if freeze_psf_weights else optax.adam(lr_psf_weights),
-                'recon':   optax.adam(lr_recon),
+                'psf_means': psf_means_optimizer,
+                'psf_covs': psf_covs_optimizer,
+                'psf_weights': psf_weights_optimizer,
+                'recon': recon_optimizer,
             },
             # label each leaf by which optimizer it should use
             param_labels=self._make_labels
@@ -117,6 +163,12 @@ class E2EOptimizer:
         model = eqx.apply_updates(model, updates)
         return model, new_opt_state, loss
 
+    def _updates_psf_on_step(self, step):
+        if self.recon_steps_per_psf_update is None:
+            return True
+        cycle_length = self.recon_steps_per_psf_update + 1
+        return step % cycle_length == self.recon_steps_per_psf_update
+
     def optimize(
         self,
         train_dataset: tf.data.Dataset,
@@ -129,6 +181,15 @@ class E2EOptimizer:
 
         if self.use_wandb:
             wandb.init(project=self.project_name, name=self.run_name, config=self.wandb_config)
+
+        # Projection should not count as a PSF update during a reconstruction
+        # step, so begin an alternating run from a valid normalized PSF.
+        if self.recon_steps_per_psf_update is not None:
+            self.model = eqx.tree_at(
+                lambda m: m.psf_module,
+                self.model,
+                self.model.psf_module.normalize_psf()
+            )
 
         data_iter = iter(train_dataset)
         sample_batch = None
@@ -149,20 +210,31 @@ class E2EOptimizer:
                 sample_batch = x_batch
             self.model, self.opt_state, loss = self.step(self.model, x_batch, self.opt_state, subkey)
 
-            # normalize PSF after each step
-            self.model = eqx.tree_at(
-                lambda m: m.psf_module,
-                self.model,
-                self.model.psf_module.normalize_psf()
-            )
+            # Project the PSF only after an actual PSF optimizer update.
+            if self._updates_psf_on_step(step):
+                self.model = eqx.tree_at(
+                    lambda m: m.psf_module,
+                    self.model,
+                    self.model.psf_module.normalize_psf()
+                )
 
 
             if step % log_every == 0 or step == num_steps - 1:
                 # K_val = float(jnp.exp(self.model.reconstruction_module.log_)) # TODO: print K when using Wiener deconv
                 loss_val = float(loss)
-                log_dict = {'train/loss': loss_val, 'step':step}
+                update_target = (
+                    'psf' if self._updates_psf_on_step(step) else 'recon'
+                )
+                log_dict = {
+                    'train/loss': loss_val,
+                    'train/update_target': update_target,
+                    'step': step,
+                }
                 # print(f"step {step}/{num_steps}  loss={loss_val:.6f}  K={K_val:.6f}")
-                msg = f"step {step}/{num_steps}  loss={loss_val:.6f}"
+                msg = (
+                    f"step {step}/{num_steps}  loss={loss_val:.6f}"
+                    f"  update={update_target}"
+                )
 
                 if self.val_dataset is not None:
                     key, subkey = jax.random.split(key)
@@ -215,5 +287,4 @@ class E2EOptimizer:
 
         plt.show()
         plt.close(fig)
-
 
