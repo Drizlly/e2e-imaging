@@ -30,6 +30,7 @@ class E2EOptimizer:
         freeze_psf_weights=False,
         recon_steps_per_psf_update: Optional[int] = None,
         corner_weight: float = 1.0,
+        charbonnier_epsilon: float = 1e-3,
     ):
         self.model = model
         self.use_wandb = use_wandb
@@ -39,6 +40,7 @@ class E2EOptimizer:
         self.test_dataset = test_dataset
         self.recon_steps_per_psf_update = recon_steps_per_psf_update
         self.corner_weight = corner_weight
+        self.charbonnier_epsilon = charbonnier_epsilon
         if use_wandb:
             self.wandb_config = wandb_config
 
@@ -49,6 +51,8 @@ class E2EOptimizer:
             raise ValueError("recon_steps_per_psf_update must be at least 1")
         if corner_weight <= 0:
             raise ValueError("corner_weight must be positive")
+        if charbonnier_epsilon <= 0:
+            raise ValueError("charbonnier_epsilon must be positive")
 
         # def make_labels(params):
         #     leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
@@ -178,7 +182,7 @@ class E2EOptimizer:
         return total_loss / num_batches
 
     def _training_loss(self, x_hat, x):
-        """MSE with extra weight on the four corner tiles of a 3x3 image."""
+        """Corner-weighted Charbonnier loss for a 3x3 tiled image."""
         height, width = x.shape[-2:]
         tile_height = height // 3
         tile_width = width // 3
@@ -199,10 +203,16 @@ class E2EOptimizer:
             -tile_height:, -tile_width:
         ].set(self.corner_weight)
 
+        error = x_hat - x
+        pixel_loss = (
+            jnp.sqrt(error ** 2 + self.charbonnier_epsilon ** 2)
+            - self.charbonnier_epsilon
+        )
+
         # Divide by total weight so changing corner_weight does not change the
         # overall loss scale merely by increasing the sum of the weights.
-        weighted_error = spatial_weights[None, ...] * (x_hat - x) ** 2
-        return jnp.sum(weighted_error) / (
+        weighted_loss = spatial_weights[None, ...] * pixel_loss
+        return jnp.sum(weighted_loss) / (
             x.shape[0] * jnp.sum(spatial_weights)
         )
 
