@@ -81,9 +81,9 @@ class UNetDeconv(eqx.Module):
     up1: StackDecoder
     classify: eqx.nn.Conv2d
 
-    def __init__(self, in_channels=1, key=None):
+    def __init__(self, key=None):
         keys = jax.random.split(key, 12)
-        self.down1 = StackEncoder(in_channels, 24, kernel_size=3, key=keys[0])
+        self.down1 = StackEncoder(1,   24,  kernel_size=3, key=keys[0])
         self.down2 = StackEncoder(24,  64,  kernel_size=3, key=keys[1])
         self.down3 = StackEncoder(64,  128, kernel_size=3, key=keys[2])
         self.down4 = StackEncoder(128, 256, kernel_size=3, key=keys[3])
@@ -97,9 +97,7 @@ class UNetDeconv(eqx.Module):
         self.classify = eqx.nn.Conv2d(24, 1, kernel_size=1, use_bias=True, key=keys[11])
     
     def _single_forward(self, x):
-        # x is (C, H, W). For the legacy one-channel input, also accept (H, W).
-        if x.ndim == 2:
-            x = x[None, ...]
+        x = x[None, ...]
         down1, out = self.down1(x)
         down2, out = self.down2(out)
         down3, out = self.down3(out)
@@ -127,17 +125,15 @@ class UNetDeconv_small(eqx.Module):
     up1: StackDecoder
     classify: eqx.nn.Conv2d
 
-    def __init__(self, in_channels=1, key=None):
+    def __init__(self, key=None):
         keys = jax.random.split(key, 4)
-        self.down1 = StackEncoder(in_channels, 24, kernel_size=3, key=keys[0])
+        self.down1 = StackEncoder(1,   24,  kernel_size=3, key=keys[0])
         self.center = ConvLnRelu2d(24, 24, kernel_size=3, padding=1, key=keys[1])
         self.up1 = StackDecoder(24+24,   24,  kernel_size=3, key=keys[2])
         self.classify = eqx.nn.Conv2d(24, 1, kernel_size=1, use_bias=True, key=keys[3])
     
     def _single_forward(self, x):
-        # x is (C, H, W). For the legacy one-channel input, also accept (H, W).
-        if x.ndim == 2:
-            x = x[None, ...]
+        x = x[None, ...]
         down1, out = self.down1(x)
         out = self.center(out)
         out = self.up1(out, down1)

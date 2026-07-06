@@ -57,57 +57,79 @@ class E2EOptimizer:
         #         labels.append('K' if has_log_K else 'psf')
         #     return treedef.unflatten(labels)
 
-        psf_means_optimizer = optax.adam(lr_psf_means)
-        psf_covs_optimizer = (
-            optax.set_to_zero()
-            if freeze_psf_covs
-            else optax.adam(lr_psf_covs)
-        )
-        psf_weights_optimizer = (
-            optax.set_to_zero()
-            if freeze_psf_weights
-            else optax.adam(lr_psf_weights)
-        )
-        recon_optimizer = optax.adam(lr_recon)
+        psf_transforms = {
+            'psf_means': optax.adam(lr_psf_means),
+            'psf_covs': (
+                optax.set_to_zero()
+                if freeze_psf_covs
+                else optax.adam(lr_psf_covs)
+            ),
+            'psf_weights': (
+                optax.set_to_zero()
+                if freeze_psf_weights
+                else optax.adam(lr_psf_weights)
+            ),
+        }
+        recon_transform = optax.adam(lr_recon)
 
-        if recon_steps_per_psf_update is not None:
-            cycle_length = recon_steps_per_psf_update + 1
-
-            def is_recon_step(step):
-                return (step % cycle_length) < recon_steps_per_psf_update
-
-            def is_psf_step(step):
-                return (step % cycle_length) == recon_steps_per_psf_update
-
-            # When a group is inactive, emit zero updates and leave its Adam
-            # state unchanged. This produces N reconstruction-only updates
-            # followed by one PSF-only update.
-            recon_optimizer = optax.conditionally_mask(
-                recon_optimizer, is_recon_step
+        if recon_steps_per_psf_update is None:
+            # Preserve the original behavior: update every parameter from one
+            # loss/gradient calculation on every optimizer step.
+            self.optimizer = optax.multi_transform(
+                {
+                    **psf_transforms,
+                    'recon': recon_transform,
+                },
+                param_labels=self._make_labels
             )
-            psf_means_optimizer = optax.conditionally_mask(
-                psf_means_optimizer, is_psf_step
+            self.opt_state = self.optimizer.init(
+                eqx.filter(model, eqx.is_array)
             )
-            psf_covs_optimizer = optax.conditionally_mask(
-                psf_covs_optimizer, is_psf_step
+            self.psf_optimizer = None
+            self.recon_optimizer = None
+            self.psf_opt_state = None
+            self.recon_opt_state = None
+        else:
+            # Start alternating optimization from a valid PSF. Each optimizer
+            # owns state only for its target module, avoiding dynamic lax.cond
+            # branches over the full model.
+            self.model = eqx.tree_at(
+                lambda m: m.psf_module,
+                self.model,
+                self.model.psf_module.normalize_psf()
             )
-            psf_weights_optimizer = optax.conditionally_mask(
-                psf_weights_optimizer, is_psf_step
+            self.psf_optimizer = optax.multi_transform(
+                psf_transforms,
+                param_labels=self._make_psf_labels
             )
+            self.recon_optimizer = recon_transform
+            self.psf_opt_state = self.psf_optimizer.init(
+                eqx.filter(self.model.psf_module, eqx.is_array)
+            )
+            self.recon_opt_state = self.recon_optimizer.init(
+                eqx.filter(self.model.reconstruction_module, eqx.is_array)
+            )
+            self.optimizer = None
+            self.opt_state = None
 
-        # Separate learning rates and update schedules for PSF and recon params.
-        self.optimizer = optax.multi_transform(
-            {
-                'psf_means': psf_means_optimizer,
-                'psf_covs': psf_covs_optimizer,
-                'psf_weights': psf_weights_optimizer,
-                'recon': recon_optimizer,
-            },
-            # label each leaf by which optimizer it should use
-            param_labels=self._make_labels
-        )
-        self.opt_state = self.optimizer.init(eqx.filter(model, eqx.is_array))
+    def _make_psf_labels(self, psf_module):
+        params = eqx.filter(psf_module, eqx.is_array)
+        leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
 
+        labels = []
+        for path, _ in leaves:
+            path_str = str(path)
+            if "means" in path_str:
+                labels.append("psf_means")
+            elif "covs" in path_str:
+                labels.append("psf_covs")
+            elif "weights" in path_str:
+                labels.append("psf_weights")
+            else:
+                # Preserve the original behavior for other PSF arrays,
+                # including the coordinate grid.
+                labels.append("psf_means")
+        return treedef.unflatten(labels)
 
     def _make_labels(self, model):
         params = eqx.filter(model, eqx.is_array)
@@ -152,6 +174,12 @@ class E2EOptimizer:
 
     # @eqx.filter_jit
     def step(self, model, x_batch, opt_state, key):
+        if self.optimizer is None:
+            raise RuntimeError(
+                "step() is only available when joint updates are enabled; "
+                "alternating runs use reconstruction_step() and psf_step()."
+            )
+
         def loss_fn(model):
             x_hat, y, psf = model(x_batch, key)
             return jnp.mean((x_hat - x_batch) ** 2)
@@ -161,6 +189,66 @@ class E2EOptimizer:
             grads, opt_state, eqx.filter(model, eqx.is_array)
         )
         model = eqx.apply_updates(model, updates)
+        return model, new_opt_state, loss
+
+    @eqx.filter_jit
+    def reconstruction_step(self, model, x_batch, opt_state, key):
+        """Update only reconstruction parameters for one batch."""
+        reconstruction_module = model.reconstruction_module
+
+        def loss_fn(candidate_reconstruction):
+            candidate_model = eqx.tree_at(
+                lambda m: m.reconstruction_module,
+                model,
+                candidate_reconstruction
+            )
+            x_hat, y, psf = candidate_model(x_batch, key)
+            return jnp.mean((x_hat - x_batch) ** 2)
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(
+            reconstruction_module
+        )
+        updates, new_opt_state = self.recon_optimizer.update(
+            grads,
+            opt_state,
+            eqx.filter(reconstruction_module, eqx.is_array)
+        )
+        reconstruction_module = eqx.apply_updates(
+            reconstruction_module, updates
+        )
+        model = eqx.tree_at(
+            lambda m: m.reconstruction_module,
+            model,
+            reconstruction_module
+        )
+        return model, new_opt_state, loss
+
+    @eqx.filter_jit
+    def psf_step(self, model, x_batch, opt_state, key):
+        """Update only PSF parameters for one batch."""
+        psf_module = model.psf_module
+
+        def loss_fn(candidate_psf):
+            candidate_model = eqx.tree_at(
+                lambda m: m.psf_module,
+                model,
+                candidate_psf
+            )
+            x_hat, y, psf = candidate_model(x_batch, key)
+            return jnp.mean((x_hat - x_batch) ** 2)
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(psf_module)
+        updates, new_opt_state = self.psf_optimizer.update(
+            grads,
+            opt_state,
+            eqx.filter(psf_module, eqx.is_array)
+        )
+        psf_module = eqx.apply_updates(psf_module, updates).normalize_psf()
+        model = eqx.tree_at(
+            lambda m: m.psf_module,
+            model,
+            psf_module
+        )
         return model, new_opt_state, loss
 
     def _updates_psf_on_step(self, step):
@@ -182,15 +270,6 @@ class E2EOptimizer:
         if self.use_wandb:
             wandb.init(project=self.project_name, name=self.run_name, config=self.wandb_config)
 
-        # Projection should not count as a PSF update during a reconstruction
-        # step, so begin an alternating run from a valid normalized PSF.
-        if self.recon_steps_per_psf_update is not None:
-            self.model = eqx.tree_at(
-                lambda m: m.psf_module,
-                self.model,
-                self.model.psf_module.normalize_psf()
-            )
-
         data_iter = iter(train_dataset)
         sample_batch = None
 
@@ -208,14 +287,28 @@ class E2EOptimizer:
             x_batch = self._convert_batch(batch)
             if step == 0:
                 sample_batch = x_batch
-            self.model, self.opt_state, loss = self.step(self.model, x_batch, self.opt_state, subkey)
-
-            # Project the PSF only after an actual PSF optimizer update.
-            if self._updates_psf_on_step(step):
+            if self.recon_steps_per_psf_update is None:
+                self.model, self.opt_state, loss = self.step(
+                    self.model, x_batch, self.opt_state, subkey
+                )
+                # Preserve the original joint-update projection behavior.
                 self.model = eqx.tree_at(
                     lambda m: m.psf_module,
                     self.model,
                     self.model.psf_module.normalize_psf()
+                )
+            elif self._updates_psf_on_step(step):
+                self.model, self.psf_opt_state, loss = self.psf_step(
+                    self.model, x_batch, self.psf_opt_state, subkey
+                )
+            else:
+                self.model, self.recon_opt_state, loss = (
+                    self.reconstruction_step(
+                        self.model,
+                        x_batch,
+                        self.recon_opt_state,
+                        subkey
+                    )
                 )
 
 
@@ -287,4 +380,3 @@ class E2EOptimizer:
 
         plt.show()
         plt.close(fig)
-
