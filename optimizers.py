@@ -29,6 +29,7 @@ class E2EOptimizer:
         freeze_psf_covs=False,
         freeze_psf_weights=False,
         recon_steps_per_psf_update: Optional[int] = None,
+        corner_weight: float = 1.0,
     ):
         self.model = model
         self.use_wandb = use_wandb
@@ -37,6 +38,7 @@ class E2EOptimizer:
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
         self.recon_steps_per_psf_update = recon_steps_per_psf_update
+        self.corner_weight = corner_weight
         if use_wandb:
             self.wandb_config = wandb_config
 
@@ -45,6 +47,8 @@ class E2EOptimizer:
             and recon_steps_per_psf_update < 1
         ):
             raise ValueError("recon_steps_per_psf_update must be at least 1")
+        if corner_weight <= 0:
+            raise ValueError("corner_weight must be positive")
 
         # def make_labels(params):
         #     leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
@@ -162,6 +166,7 @@ class E2EOptimizer:
         return jnp.array(batch)
     
     def _compute_loss(self, dataset, key):
+        """Compute ordinary, unweighted MSE for comparable evaluation."""
         total_loss = 0.0
         num_batches = 0
         for batch in dataset:
@@ -171,6 +176,35 @@ class E2EOptimizer:
             total_loss += float(jnp.mean((x_hat - x_batch) ** 2))
             num_batches += 1
         return total_loss / num_batches
+
+    def _training_loss(self, x_hat, x):
+        """MSE with extra weight on the four corner tiles of a 3x3 image."""
+        height, width = x.shape[-2:]
+        tile_height = height // 3
+        tile_width = width // 3
+
+        spatial_weights = jnp.ones(
+            (height, width), dtype=x_hat.dtype
+        )
+        spatial_weights = spatial_weights.at[
+            :tile_height, :tile_width
+        ].set(self.corner_weight)
+        spatial_weights = spatial_weights.at[
+            :tile_height, -tile_width:
+        ].set(self.corner_weight)
+        spatial_weights = spatial_weights.at[
+            -tile_height:, :tile_width
+        ].set(self.corner_weight)
+        spatial_weights = spatial_weights.at[
+            -tile_height:, -tile_width:
+        ].set(self.corner_weight)
+
+        # Divide by total weight so changing corner_weight does not change the
+        # overall loss scale merely by increasing the sum of the weights.
+        weighted_error = spatial_weights[None, ...] * (x_hat - x) ** 2
+        return jnp.sum(weighted_error) / (
+            x.shape[0] * jnp.sum(spatial_weights)
+        )
 
     # @eqx.filter_jit
     def step(self, model, x_batch, opt_state, key):
@@ -182,7 +216,7 @@ class E2EOptimizer:
 
         def loss_fn(model):
             x_hat, y, psf = model(x_batch, key)
-            return jnp.mean((x_hat - x_batch) ** 2)
+            return self._training_loss(x_hat, x_batch)
 
         loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
         updates, new_opt_state = self.optimizer.update(
@@ -203,7 +237,7 @@ class E2EOptimizer:
                 candidate_reconstruction
             )
             x_hat, y, psf = candidate_model(x_batch, key)
-            return jnp.mean((x_hat - x_batch) ** 2)
+            return self._training_loss(x_hat, x_batch)
 
         loss, grads = eqx.filter_value_and_grad(loss_fn)(
             reconstruction_module
@@ -235,7 +269,7 @@ class E2EOptimizer:
                 candidate_psf
             )
             x_hat, y, psf = candidate_model(x_batch, key)
-            return jnp.mean((x_hat - x_batch) ** 2)
+            return self._training_loss(x_hat, x_batch)
 
         loss, grads = eqx.filter_value_and_grad(loss_fn)(psf_module)
         updates, new_opt_state = self.psf_optimizer.update(
