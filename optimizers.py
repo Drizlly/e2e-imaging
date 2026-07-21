@@ -28,9 +28,6 @@ class E2EOptimizer:
         test_dataset: Optional[tf.data.Dataset] = None,
         freeze_psf_covs=False,
         freeze_psf_weights=False,
-        recon_steps_per_psf_update: Optional[int] = None,
-        corner_weight: float = 1.0,
-        charbonnier_epsilon: float = 1e-3,
     ):
         self.model = model
         self.use_wandb = use_wandb
@@ -38,21 +35,8 @@ class E2EOptimizer:
         self.run_name = run_name
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
-        self.recon_steps_per_psf_update = recon_steps_per_psf_update
-        self.corner_weight = corner_weight
-        self.charbonnier_epsilon = charbonnier_epsilon
         if use_wandb:
             self.wandb_config = wandb_config
-
-        if (
-            recon_steps_per_psf_update is not None
-            and recon_steps_per_psf_update < 1
-        ):
-            raise ValueError("recon_steps_per_psf_update must be at least 1")
-        if corner_weight <= 0:
-            raise ValueError("corner_weight must be positive")
-        if charbonnier_epsilon <= 0:
-            raise ValueError("charbonnier_epsilon must be positive")
 
         # def make_labels(params):
         #     leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
@@ -65,79 +49,19 @@ class E2EOptimizer:
         #         labels.append('K' if has_log_K else 'psf')
         #     return treedef.unflatten(labels)
 
-        psf_transforms = {
-            'psf_means': optax.adam(lr_psf_means),
-            'psf_covs': (
-                optax.set_to_zero()
-                if freeze_psf_covs
-                else optax.adam(lr_psf_covs)
-            ),
-            'psf_weights': (
-                optax.set_to_zero()
-                if freeze_psf_weights
-                else optax.adam(lr_psf_weights)
-            ),
-        }
-        recon_transform = optax.adam(lr_recon)
+        # separate learning rates for PSF params vs log_K
+        self.optimizer = optax.multi_transform(
+            {
+                'psf_means': optax.adam(lr_psf_means),
+                'psf_covs':    optax.set_to_zero() if freeze_psf_covs else optax.adam(lr_psf_covs),
+                'psf_weights':  optax.set_to_zero() if freeze_psf_weights else optax.adam(lr_psf_weights),
+                'recon':   optax.adam(lr_recon),
+            },
+            # label each leaf by which optimizer it should use
+            param_labels=self._make_labels
+        )
+        self.opt_state = self.optimizer.init(eqx.filter(model, eqx.is_array))
 
-        if recon_steps_per_psf_update is None:
-            # Preserve the original behavior: update every parameter from one
-            # loss/gradient calculation on every optimizer step.
-            self.optimizer = optax.multi_transform(
-                {
-                    **psf_transforms,
-                    'recon': recon_transform,
-                },
-                param_labels=self._make_labels
-            )
-            self.opt_state = self.optimizer.init(
-                eqx.filter(model, eqx.is_array)
-            )
-            self.psf_optimizer = None
-            self.recon_optimizer = None
-            self.psf_opt_state = None
-            self.recon_opt_state = None
-        else:
-            # Start alternating optimization from a valid PSF. Each optimizer
-            # owns state only for its target module, avoiding dynamic lax.cond
-            # branches over the full model.
-            self.model = eqx.tree_at(
-                lambda m: m.psf_module,
-                self.model,
-                self.model.psf_module.normalize_psf()
-            )
-            self.psf_optimizer = optax.multi_transform(
-                psf_transforms,
-                param_labels=self._make_psf_labels
-            )
-            self.recon_optimizer = recon_transform
-            self.psf_opt_state = self.psf_optimizer.init(
-                eqx.filter(self.model.psf_module, eqx.is_array)
-            )
-            self.recon_opt_state = self.recon_optimizer.init(
-                eqx.filter(self.model.reconstruction_module, eqx.is_array)
-            )
-            self.optimizer = None
-            self.opt_state = None
-
-    def _make_psf_labels(self, psf_module):
-        params = eqx.filter(psf_module, eqx.is_array)
-        leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
-
-        labels = []
-        for path, _ in leaves:
-            path_str = str(path)
-            if "means" in path_str:
-                labels.append("psf_means")
-            elif "covs" in path_str:
-                labels.append("psf_covs")
-            elif "weights" in path_str:
-                labels.append("psf_weights")
-            else:
-                # Preserve the original behavior for other PSF arrays,
-                # including the coordinate grid.
-                labels.append("psf_means")
-        return treedef.unflatten(labels)
 
     def _make_labels(self, model):
         params = eqx.filter(model, eqx.is_array)
@@ -170,7 +94,6 @@ class E2EOptimizer:
         return jnp.array(batch)
     
     def _compute_loss(self, dataset, key):
-        """Compute ordinary, unweighted MSE for comparable evaluation."""
         total_loss = 0.0
         num_batches = 0
         for batch in dataset:
@@ -181,52 +104,11 @@ class E2EOptimizer:
             num_batches += 1
         return total_loss / num_batches
 
-    def _training_loss(self, x_hat, x):
-        """Corner-weighted Charbonnier loss for a 3x3 tiled image."""
-        height, width = x.shape[-2:]
-        tile_height = height // 3
-        tile_width = width // 3
-
-        spatial_weights = jnp.ones(
-            (height, width), dtype=x_hat.dtype
-        )
-        spatial_weights = spatial_weights.at[
-            :tile_height, :tile_width
-        ].set(self.corner_weight)
-        spatial_weights = spatial_weights.at[
-            :tile_height, -tile_width:
-        ].set(self.corner_weight)
-        spatial_weights = spatial_weights.at[
-            -tile_height:, :tile_width
-        ].set(self.corner_weight)
-        spatial_weights = spatial_weights.at[
-            -tile_height:, -tile_width:
-        ].set(self.corner_weight)
-
-        error = x_hat - x
-        pixel_loss = (
-            jnp.sqrt(error ** 2 + self.charbonnier_epsilon ** 2)
-            - self.charbonnier_epsilon
-        )
-
-        # Divide by total weight so changing corner_weight does not change the
-        # overall loss scale merely by increasing the sum of the weights.
-        weighted_loss = spatial_weights[None, ...] * pixel_loss
-        return jnp.sum(weighted_loss) / (
-            x.shape[0] * jnp.sum(spatial_weights)
-        )
-
     # @eqx.filter_jit
     def step(self, model, x_batch, opt_state, key):
-        if self.optimizer is None:
-            raise RuntimeError(
-                "step() is only available when joint updates are enabled; "
-                "alternating runs use reconstruction_step() and psf_step()."
-            )
-
         def loss_fn(model):
             x_hat, y, psf = model(x_batch, key)
-            return self._training_loss(x_hat, x_batch)
+            return jnp.mean((x_hat - x_batch) ** 2)
 
         loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
         updates, new_opt_state = self.optimizer.update(
@@ -234,72 +116,6 @@ class E2EOptimizer:
         )
         model = eqx.apply_updates(model, updates)
         return model, new_opt_state, loss
-
-    @eqx.filter_jit
-    def reconstruction_step(self, model, x_batch, opt_state, key):
-        """Update only reconstruction parameters for one batch."""
-        reconstruction_module = model.reconstruction_module
-
-        def loss_fn(candidate_reconstruction):
-            candidate_model = eqx.tree_at(
-                lambda m: m.reconstruction_module,
-                model,
-                candidate_reconstruction
-            )
-            x_hat, y, psf = candidate_model(x_batch, key)
-            return self._training_loss(x_hat, x_batch)
-
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(
-            reconstruction_module
-        )
-        updates, new_opt_state = self.recon_optimizer.update(
-            grads,
-            opt_state,
-            eqx.filter(reconstruction_module, eqx.is_array)
-        )
-        reconstruction_module = eqx.apply_updates(
-            reconstruction_module, updates
-        )
-        model = eqx.tree_at(
-            lambda m: m.reconstruction_module,
-            model,
-            reconstruction_module
-        )
-        return model, new_opt_state, loss
-
-    @eqx.filter_jit
-    def psf_step(self, model, x_batch, opt_state, key):
-        """Update only PSF parameters for one batch."""
-        psf_module = model.psf_module
-
-        def loss_fn(candidate_psf):
-            candidate_model = eqx.tree_at(
-                lambda m: m.psf_module,
-                model,
-                candidate_psf
-            )
-            x_hat, y, psf = candidate_model(x_batch, key)
-            return self._training_loss(x_hat, x_batch)
-
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(psf_module)
-        updates, new_opt_state = self.psf_optimizer.update(
-            grads,
-            opt_state,
-            eqx.filter(psf_module, eqx.is_array)
-        )
-        psf_module = eqx.apply_updates(psf_module, updates).normalize_psf()
-        model = eqx.tree_at(
-            lambda m: m.psf_module,
-            model,
-            psf_module
-        )
-        return model, new_opt_state, loss
-
-    def _updates_psf_on_step(self, step):
-        if self.recon_steps_per_psf_update is None:
-            return True
-        cycle_length = self.recon_steps_per_psf_update + 1
-        return step % cycle_length == self.recon_steps_per_psf_update
 
     def optimize(
         self,
@@ -331,47 +147,22 @@ class E2EOptimizer:
             x_batch = self._convert_batch(batch)
             if step == 0:
                 sample_batch = x_batch
-            if self.recon_steps_per_psf_update is None:
-                self.model, self.opt_state, loss = self.step(
-                    self.model, x_batch, self.opt_state, subkey
-                )
-                # Preserve the original joint-update projection behavior.
-                self.model = eqx.tree_at(
-                    lambda m: m.psf_module,
-                    self.model,
-                    self.model.psf_module.normalize_psf()
-                )
-            elif self._updates_psf_on_step(step):
-                self.model, self.psf_opt_state, loss = self.psf_step(
-                    self.model, x_batch, self.psf_opt_state, subkey
-                )
-            else:
-                self.model, self.recon_opt_state, loss = (
-                    self.reconstruction_step(
-                        self.model,
-                        x_batch,
-                        self.recon_opt_state,
-                        subkey
-                    )
-                )
+            self.model, self.opt_state, loss = self.step(self.model, x_batch, self.opt_state, subkey)
+
+            # normalize PSF after each step
+            self.model = eqx.tree_at(
+                lambda m: m.psf_module,
+                self.model,
+                self.model.psf_module.normalize_psf()
+            )
 
 
             if step % log_every == 0 or step == num_steps - 1:
                 # K_val = float(jnp.exp(self.model.reconstruction_module.log_)) # TODO: print K when using Wiener deconv
                 loss_val = float(loss)
-                update_target = (
-                    'psf' if self._updates_psf_on_step(step) else 'recon'
-                )
-                log_dict = {
-                    'train/loss': loss_val,
-                    'train/update_target': update_target,
-                    'step': step,
-                }
+                log_dict = {'train/loss': loss_val, 'step':step}
                 # print(f"step {step}/{num_steps}  loss={loss_val:.6f}  K={K_val:.6f}")
-                msg = (
-                    f"step {step}/{num_steps}  loss={loss_val:.6f}"
-                    f"  update={update_target}"
-                )
+                msg = f"step {step}/{num_steps}  loss={loss_val:.6f}"
 
                 if self.val_dataset is not None:
                     key, subkey = jax.random.split(key)
@@ -424,3 +215,5 @@ class E2EOptimizer:
 
         plt.show()
         plt.close(fig)
+
+
